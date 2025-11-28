@@ -1,6 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+tmp_err=$(mktemp)
+trap 'rm -f "$tmp_err"' EXIT
+
+if ! shaman_id=$(python3 getUpstreamBuildDetails.py \
+  --branch tentacle \
+  --platform ubuntu-jammy-default,centos-9-default,centos-9-crimson-debug \
+  --arch x86_64 2>"$tmp_err"); then
+  echo "ERROR: Failed to get upstream build details:" >&2
+  cat "$tmp_err" >&2
+  exit 1
+fi
+
 shaman_id=$(python3 getUpstreamBuildDetails.py \
   --branch tentacle \
   --platform ubuntu-jammy \

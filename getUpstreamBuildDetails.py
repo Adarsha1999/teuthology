@@ -1,7 +1,8 @@
 import requests
+import sys
 from docopt import docopt
 
-BUILD_URL = "https://shaman.ceph.com/api/repos/ceph/{}/latest/{}/{}"
+BUILD_URL = "https://shaman.ceph.com/api/repos/ceph/{}/latest/{}/{}/flavors/{}"
 IMAGE_URL = "quay.ceph.io/ceph-ci/ceph:{}"
 
 doc = """
@@ -36,8 +37,8 @@ def fetch_upstream_build(branch, platform="centos-9", arch="x86_64"):
     build = {}
 
     # Get shaman build url
-    os_type, os_version = platform.split("-")
-    url = BUILD_URL.format(branch, os_type, os_version)
+    os_type, os_version, flavors = platform.split("-", 2)
+    url = BUILD_URL.format(branch, os_type, os_version, flavors)
 
     # Disable insecure request warning in response
     requests.packages.urllib3.disable_warnings(
@@ -73,7 +74,7 @@ def fetch_upstream_build(branch, platform="centos-9", arch="x86_64"):
     build["image"] = image
     build["shaman_id"] = _id
 
-    return build["shaman_id"]
+    return build
 
 def write_output(data, output):
     """Write output"""
@@ -89,15 +90,28 @@ def write_output(data, output):
 
 
 if __name__ == "__main__":
-    # Get script parameters from args
     args = docopt(doc)
-    branch = args.get("--branch").lower()
-    platform = args.get("--platform").lower()
-    arch = args.get("--arch").lower()
+    branch = args["--branch"].lower()
+    arch = args["--arch"].lower()
     output = args.get("--output")
 
-    # Fetch upstream build details
-    build = fetch_upstream_build(branch=branch, platform=platform, arch=arch)
+    # Support comma-separated platform list
+    platforms = [p.strip().lower() for p in args["--platform"].split(",")]
 
-    # Write output
-    write_output(build, output)
+    builds = []
+    for platform in platforms:
+        build = fetch_upstream_build(branch=branch, platform=platform, arch=arch)
+        build["platform"] = platform   # annotate for error reporting
+        builds.append(build)
+
+    # Extract IDs
+    shaman_ids = [b["shaman_id"] for b in builds]
+
+    # Check ID consistency across all platforms
+    if len(set(shaman_ids)) > 1:
+        print("ERROR: Multiple platforms returned *different* shaman_ids:", file=sys.stderr)
+        for b in builds:
+            print(f"  {b['platform']}: {b['shaman_id']}", file=sys.stderr)
+        sys.exit(1)
+
+    write_output(shaman_ids[0], output)
