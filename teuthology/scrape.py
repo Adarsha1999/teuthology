@@ -14,7 +14,14 @@ import subprocess
 
 
 log = logging.getLogger('scrape')
-log.addHandler(logging.StreamHandler())
+_scrape_stream_handler = logging.StreamHandler()
+# Apply log masking filter if enabled
+try:
+    from teuthology.util.logmask import apply_filter_to_handler
+    apply_filter_to_handler(_scrape_stream_handler)
+except ImportError:
+    pass
+log.addHandler(_scrape_stream_handler)
 log.setLevel(logging.INFO)
 
 
@@ -470,8 +477,14 @@ def give_me_a_reason(job):
 class Scraper(object):
     def __init__(self, target_dir):
         self.target_dir = target_dir
-        log.addHandler(logging.FileHandler(os.path.join(target_dir,
-                                                     "scrape.log")))
+        handler = logging.FileHandler(os.path.join(target_dir, "scrape.log"))
+        # Apply log masking filter if enabled
+        try:
+            from teuthology.util.logmask import apply_filter_to_handler
+            apply_filter_to_handler(handler)
+        except ImportError:
+            pass
+        log.addHandler(handler)
 
     def analyze(self):
         entries = os.listdir(self.target_dir)
