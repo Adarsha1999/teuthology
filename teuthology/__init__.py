@@ -66,6 +66,15 @@ logging.basicConfig(
     format='%(asctime)s.%(msecs)03d %(levelname)s:%(name)s:%(message)s')
 log = logging.getLogger(__name__)
 
+# Enable log masking by default (disable with TEUTHOLOGY_LOG_MASKING=0)
+if os.environ.get('TEUTHOLOGY_LOG_MASKING', '1').lower() not in ('0', 'false', 'no'):
+    try:
+        from teuthology.util.logmask import enable_log_masking
+        enable_log_masking()
+        log.debug('Log masking enabled')
+    except ImportError:
+        pass
+
 log.debug('teuthology version: %s', __version__)
 
 
@@ -83,6 +92,14 @@ def setup_log_file(log_path):
         datefmt='%Y-%m-%dT%H:%M:%S')
     handler = logging.FileHandler(filename=log_path)
     handler.setFormatter(formatter)
+        
+    # Apply log masking filter to new handler if masking is enabled
+    try:
+        from teuthology.util.logmask import apply_filter_to_handler
+        apply_filter_to_handler(handler)
+    except ImportError:
+        pass
+    
     root_logger.addHandler(handler)
     root_logger.info('teuthology version: %s', __version__)
 

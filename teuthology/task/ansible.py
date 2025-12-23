@@ -173,8 +173,15 @@ class Ansible(Task):
         self.generated_playbook = False
         self.log = logging.Logger(__name__)
         if ctx.archive:
-            self.log.addHandler(logging.FileHandler(
-                os.path.join(ctx.archive, "ansible.log")))
+            handler = logging.FileHandler(
+                os.path.join(ctx.archive, "ansible.log"))
+            # Apply log masking filter if enabled
+            try:
+                from teuthology.util.logmask import apply_filter_to_handler
+                apply_filter_to_handler(handler)
+            except ImportError:
+                pass
+            self.log.addHandler(handler)
 
     def setup(self):
         log.info("Setting up ansible")
