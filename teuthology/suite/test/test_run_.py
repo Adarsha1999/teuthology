@@ -44,7 +44,6 @@ class TestRun(object):
     def test_email_addr(self, m_git_validate_sha1,
                         m_git_ls_remote, _, m_verify_sha_id):
         m_verify_sha_id.return_value = None
-
         # neuter choose_X_branch
         m_git_validate_sha1.return_value = self.args_dict['ceph_sha1']
         self.args_dict['teuthology_branch'] = 'main'
@@ -212,7 +211,6 @@ class TestRun(object):
     @patch('teuthology.suite.run.util.package_version_for_hash')
     def test_os_type(self, m_pvfh, m_git_ls_remote, m_fetch_repos, m_verify_sha_id):
         m_verify_sha_id.return_value = None
-
         m_git_ls_remote.return_value = "sha1"
         del self.args['distro']
         run_ = run.Run(self.args)
@@ -234,7 +232,6 @@ class TestRun(object):
     @patch('teuthology.suite.run.util.package_version_for_hash')
     def test_sha1(self, m_pvfh, m_git_ls_remote, m_fetch_repos, m_verify_sha_id):
         m_verify_sha_id.return_value = None
-
         m_git_ls_remote.return_value = "sha1"
         del self.args['distro']
         run_ = run.Run(self.args)
@@ -484,22 +481,6 @@ class TestScheduleSuite(object):
         and the ceph_sha1 is not supplied. We should expect that the
         ceph_hash and suite_hash will be updated to the working sha1
         """
-        def mock_get(url, **kwargs):
-            response = requests.Response()
-            response.status_code = 200
-            response.raise_for_status = lambda: None
-            if 'chacra' in url:
-                # Include both the original hash and all backtracked hashes
-                response.json = lambda: {
-                    self.args.ceph_sha1: {},
-                    **{f"ceph_sha1_{i}": {} for i in range(5)}
-                }
-                response.headers['Content-Type'] = 'application/json'
-            elif 'shaman' in url:
-                raise requests.exceptions.RequestException("Mock Shaman failure")
-            return response
-        m_requests_get.side_effect = mock_get
-
         m_get_arch.return_value = 'x86_64'
         # rig has_packages_for_distro to fail this many times, so
         # everything will run NUM_FAILS+1 times
@@ -579,7 +560,6 @@ class TestScheduleSuite(object):
                 assert job_yaml.get('sha1') == working_sha1
                 assert job_yaml.get('suite_sha1') == working_sha1
 
-    @patch('teuthology.suite.run.requests.get')
     @patch('teuthology.suite.util.find_git_parents')
     @patch('teuthology.suite.run.Run.schedule_jobs')
     @patch('teuthology.suite.run.Run.write_rerun_memo')
@@ -602,7 +582,6 @@ class TestScheduleSuite(object):
         m_write_rerun_memo,
         m_schedule_jobs,
         m_find_git_parents,
-        m_requests_get,
     ):
         """
         Test that we can successfully schedule a job with newest
@@ -611,22 +590,6 @@ class TestScheduleSuite(object):
         ceph_hash will be updated to the working sha1,
         but the suite_hash will remain the original suite_sha1.
         """
-        def mock_get(url, **kwargs):
-            response = requests.Response()
-            response.status_code = 200
-            response.raise_for_status = lambda: None
-            if 'chacra' in url:
-                # Include both the original hash and all backtracked hashes
-                response.json = lambda: {
-                    self.args.ceph_sha1: {},
-                    **{f"ceph_sha1_{i}": {} for i in range(5)}
-                }
-                response.headers['Content-Type'] = 'application/json'
-            elif 'shaman' in url:
-                raise requests.exceptions.RequestException("Mock Shaman failure")
-            return response
-        m_requests_get.side_effect = mock_get
-
         m_get_arch.return_value = 'x86_64'
         # Set different branches
         self.args.ceph_branch = 'ceph_different_branch'

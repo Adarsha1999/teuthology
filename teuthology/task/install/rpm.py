@@ -2,14 +2,13 @@ import logging
 import os.path
 from io import StringIO
 
-from distutils.version import LooseVersion
-
 from teuthology.config import config as teuth_config
 from teuthology.contextutil import safe_while
 from teuthology.orchestra import run
 from teuthology import packaging
 
 from teuthology.task.install.util import _get_builder_project, _get_local_dir
+from teuthology.util.version import LooseVersion
 
 log = logging.getLogger(__name__)
 
@@ -50,6 +49,8 @@ def _remove(ctx, config, remote, rpm):
     if repos:
         if dist_release in ['opensuse', 'sle']:
             _zypper_removerepo(remote, repos)
+        if dist_release in ['centos', 'rocky', 'alma']:
+            _yum_removerepo(remote, repos)
         else:
             raise Exception('Custom repos were specified for %s ' % remote_os +
                             'but these are currently not supported')
@@ -113,6 +114,54 @@ def _zypper_wipe_all_repos(remote):
     remote.sh('sudo zypper repos -upEP && '
               'sudo rm -f /etc/zypp/repos.d/* || '
               'true')
+
+
+def _yum_addrepo(remote, repo_list):
+    """
+    Add dnf repos to the remote system.
+
+    :param remote: remote node where to add packages
+    :param repo_list: list of dictionaries with keys 'name', 'url'
+    :return:
+    """
+    for repo in repo_list:
+        repo_lines = [f"[{repo['name']}]"]
+        repo_lines += [
+            f"name={repo['name']}",
+            f"baseurl={repo['url']}",
+            "enabled=1",
+            "gpgcheck=0",
+        ]
+        if 'priority' in repo:
+            repo_lines += [f"priority={repo['priority']}"]
+        repo_path=f"/etc/yum.repos.d/{repo['name']}.repo"
+        remote.sudo_write_file(repo_path, "\n".join(repo_lines))
+
+
+def _yum_removerepo(remote, repo_list):
+    """
+    Remove yum repos on the remote system.
+
+    :param remote: remote node where to remove packages from
+    :param repo_list: list of dictionaries with keys 'name', 'url'
+    :return:
+    """
+    for repo in repo_list:
+        repo_path=f"/etc/yum.repos.d/{repo['name']}.repo"
+        remote.run(args=['sudo', 'rm', repo_path])
+
+
+def _yum_wipe_all_repos(remote):
+    """
+    Completely "wipe" (remove) all yum repos
+
+    :param remote: remote node where to wipe zypper repos
+    :return:
+    """
+    log.info("Wiping yum repos (if any)")
+    remote.sh('sudo rm -f /etc/yum.repos.d/* || '
+              'true')
+
 
 def _downgrade_packages(ctx, remote, pkgs, pkg_version, config):
     """
@@ -180,20 +229,12 @@ def _update_package_list_and_install(ctx, remote, rpm, config):
         for copr in enable_coprs:
             remote.run(args=['sudo', 'dnf', '-y', 'copr', 'enable', copr])
 
-    # rpm does not force installation of a particular version of the project
-    # packages, so we can put extra_system_packages together with the rest
-    system_pkglist = config.get('extra_system_packages')
-    if system_pkglist:
-        if isinstance(system_pkglist, dict):
-            rpm += system_pkglist.get('rpm')
-        else:
-            rpm += system_pkglist
     remote_os = remote.os
-
     dist_release = remote_os.name
     log.debug("_update_package_list_and_install: config is {}".format(config))
     repos = config.get('repos')
     install_ceph_packages = config.get('install_ceph_packages')
+    builder = _get_builder_project(ctx, remote, config)
     repos_only = config.get('repos_only')
 
     if repos:
@@ -201,11 +242,12 @@ def _update_package_list_and_install(ctx, remote, rpm, config):
         if dist_release in ['opensuse', 'sle']:
             _zypper_wipe_all_repos(remote)
             _zypper_addrepo(remote, repos)
+        if dist_release in ['centos', 'rocky', 'alma']:
+            _yum_addrepo(remote, repos)
         else:
             raise Exception('Custom repos were specified for %s ' % remote_os +
                             'but these are currently not supported')
     else:
-        builder = _get_builder_project(ctx, remote, config)
         log.info('Pulling from %s', builder.base_url)
         log.info('Package version is %s', builder.version)
         builder.install_repo()
@@ -214,27 +256,28 @@ def _update_package_list_and_install(ctx, remote, rpm, config):
         log.info("repos_only was specified: not installing any packages")
         return None
 
+    packages = list(rpm)
     if not install_ceph_packages:
         log.info("install_ceph_packages set to False: not installing Ceph packages")
         # Although "librados2" is an indirect dependency of ceph-test, we
         # install it separately because, otherwise, ceph-test cannot be
         # installed (even with --force) when there are several conflicting
         # repos from different vendors.
-        rpm = ["librados2", "ceph-test"]
+        packages = ["librados2", "ceph-test"]
 
     # rpm does not force installation of a particular version of the project
     # packages, so we can put extra_system_packages together with the rest
     system_pkglist = config.get('extra_system_packages', [])
     if system_pkglist:
         if isinstance(system_pkglist, dict):
-            rpm += system_pkglist.get('rpm')
+            packages += system_pkglist.get('rpm')
         else:
-            rpm += system_pkglist
+            packages += system_pkglist
 
     log.info("Installing packages: {pkglist} on remote rpm {arch}".format(
-        pkglist=", ".join(rpm), arch=remote.arch))
+        pkglist=", ".join(packages), arch=remote.arch))
 
-    if dist_release not in ['opensuse', 'sle']:
+    if dist_release not in ['opensuse', 'sle'] and not repos:
         project = builder.project
         uri = builder.uri_reference
         _yum_fix_repo_priority(remote, project, uri)
@@ -255,17 +298,19 @@ def _update_package_list_and_install(ctx, remote, rpm, config):
     else:
         remove_cmd = 'sudo yum -y remove'
         install_cmd = 'sudo yum -y install'
+
+    if dist_release not in ['opensuse', 'sle'] and not repos:
         # to compose version string like "0.94.10-87.g116a558.el7"
         pkg_version = '.'.join([builder.version, builder.dist_release])
-        rpm = _downgrade_packages(ctx, remote, rpm, pkg_version, config)
+        packages = _downgrade_packages(ctx, remote, packages, pkg_version, config)
 
     if system_pkglist:
         _retry_if_failures_are_recoverable(remote,
             args='{install_cmd} {rpms}'
-                 .format(install_cmd=install_cmd, rpms=' '.join(rpm))
+                 .format(install_cmd=install_cmd, rpms=' '.join(packages))
             )
     else:
-        for cpack in rpm:
+        for cpack in packages:
             if ldir:
                 _retry_if_failures_are_recoverable(remote,
                   args='''

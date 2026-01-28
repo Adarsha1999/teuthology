@@ -37,43 +37,42 @@ echo "Using Python: $PYTHON"
 echo "Detecting operating system..."
 case "$(uname -s)" in
 Linux)
-        if command -v lsb_release; then
-                OS=$(lsb_release --id --short)
-        else
-                . /etc/os-release
-                OS=$(echo $NAME | tr -d ' ')
-        fi
-        echo "Detected OS: $OS"
-        has_pkg="rpm --whatprovides"
-        install_pkg="sudo dnf install -y"
-        case "$OS" in
-        Ubuntu|Debian|LinuxMint)
-                deps=(qemu-utils python3-dev libssl-dev python3-pip python3-wheel python3-venv libev-dev libvirt-dev libffi-dev libyaml-dev build-essential jq curl)
-                has_pkg="dpkg -s"
-                install_pkg="sudo apt install -y"
-                ;;
-        RedHatEnterpriseWorkstation|RedHatEnterpriseServer|RedHatEnterprise|CentOS)
-                deps=(python39-pip python39-devel mariadb-devel libev-devel libvirt-devel libffi-devel)
-                ;;
-        CentOSStream)
-                PYTHON=python3.12
-                deps=($PYTHON-pip $PYTHON-devel)
-                ;;
-        AlmaLinux|RockyLinux)
-                PYTHON=python3.12
-                deps=($PYTHON-pip $PYTHON-devel libev-devel libvirt-devel libffi-devel)
-                ;;
-        Fedora|FedoraLinux)
-                PYTHON=python3.12
-                deps=($PYTHON-pip $PYTHON-devel libev-devel libvirt-devel libffi-devel)
-                ;;
-        "openSUSE project"|"SUSE LINUX"|"openSUSE"|"openSUSELeap"|"openSUSETumbleweed")
-                PYTHON=python3.12
-                deps=(python312-pip python312-devel python312 libev-devel libvirt-devel libffi-devel)
-                install_pkg="sudo zypper install"
-                ;;
-        esac
+    if command -v lsb_release; then
+        OS=$(lsb_release --id --short)
+    else
+        . /etc/os-release
+        OS=$(echo $NAME | tr -d ' ')
+    fi
+    # rpm/dnf is the default, to reduce repetition in the case statement
+    has_pkg="rpm -q --whatprovides"
+    install_pkg="sudo dnf install -y"
+    case "$OS" in
+    Ubuntu|Debian|LinuxMint)
+        deps=(qemu-utils python3-dev libssl-dev python3-pip python3-wheel python3-venv libev-dev libvirt-dev libffi-dev libyaml-dev build-essential jq curl)
+        has_pkg="dpkg -s"
+        install_pkg="sudo apt install -y"
         ;;
+    RedHatEnterpriseWorkstation|RedHatEnterpriseServer|RedHatEnterprise|CentOS)
+        deps=(python39-pip python39-devel mariadb-devel libev-devel libvirt-devel libffi-devel)
+        ;;
+    CentOSStream)
+        PYTHON=python3.12
+        deps=($PYTHON-pip $PYTHON-devel)
+        ;;
+    AlmaLinux|RockyLinux)
+        PYTHON=python3.12
+        deps=($PYTHON-pip $PYTHON-devel libev-devel libvirt-devel libffi-devel)
+        ;;
+    Fedora|FedoraLinux)
+        deps=($PYTHON-pip $PYTHON-devel libev-devel libvirt-devel libffi-devel)
+        ;;
+    "openSUSE project"|"SUSE LINUX"|"openSUSE"|"openSUSELeap"|"openSUSETumbleweed")
+        PYTHON=python3.12
+        deps=(python312-pip python312-devel python312 libev-devel libvirt-devel libffi-devel)
+        install_pkg="sudo zypper install"
+        ;;
+    esac
+    ;;
 
 Darwin)
         deps="python libvirt libev libffi"
@@ -128,32 +127,27 @@ export LANG=${LANG:-C.UTF-8}
 (echo $LANG | grep -qi utf-8) || export LC_ALL=$LANG.UTF-8
 
 if [ -z "$NO_CLOBBER" ] && \
-    [ ! -e "$VENV/bin/pip" -o ! -e "$VENV/bin/$PYTHON" ] || \
-    [ "${PYTHON_VER_OUT}" != "$($VENV/bin/$PYTHON --version)" ] \
-    ; then
-        echo "Removing existing virtual environment..."
-        rm -rf virtualenv
+  [ ! -e "$VENV/bin/pip" -o ! -e "$VENV/bin/$PYTHON" ] || \
+  [ "${PYTHON_VER_OUT}" != "$($VENV/bin/$PYTHON --version)" ] \
+  ; then
+   echo "Deleting existing virtual environment"
+    rm -rf virtualenv
 fi
 
 if [ -z "$NO_CLOBBER" ] || [ ! -e $VENV ]; then
-        echo "Creating virtual environment..."
-        $PYTHON_BIN -m venv $VENV
+    echo "Creating new venv at $VENV"
+    $PYTHON_BIN -m venv $VENV
 fi
 
-echo "Ensuring compatible pip version..."
 PY_MAJOR=$($VENV/bin/python -c "import sys; print(sys.version_info[0])")
 PY_MINOR=$($VENV/bin/python -c "import sys; print(sys.version_info[1])")
 
-# Downgrade pip for older Python versions
-if [ "$PY_MAJOR" -eq 3 ] && [ "$PY_MINOR" -lt 6 ]; then
-    echo "Detected Python $PY_MAJOR.$PY_MINOR — installing pip 20.3.4"
-    $VENV/bin/python -m ensurepip
-    $VENV/bin/pip install pip==20.3.4 --force-reinstall
-else
-    echo "Detected Python $PY_MAJOR.$PY_MINOR — keeping default pip"
+# Python version check
+if [[ "$PY_MAJOR" -ne 3 || "$PY_MINOR" -lt 10 ]]; then
+    echo "Python version should be 3.10 or higher, found $PY_MAJOR.$PY_MINOR"
+    exit 1
 fi
 
-echo "Installing packaging module..."
 $VENV/bin/pip install packaging
 
 if [ -f "$VENV/bin/ansible" ]; then
@@ -180,4 +174,4 @@ $VENV/bin/pip check
 echo "Installing Ansible collections..."
 $VENV/bin/ansible-galaxy install -r requirements.yml
 
-echo "Bootstrap script completed successfully."
+echo "Bootstrap completed successfully!!!"

@@ -107,7 +107,7 @@ def main(args):
     worst_returncode = 0
     loop_exit_count = 0
     max_loop_exits = 10  # Prevent infinite restart loops
-    
+
     while keep_running:
         try:
             # Check to see if we have a teuthology-results process hanging around
@@ -130,7 +130,6 @@ def main(args):
                     worst_returncode = max([worst_returncode, rc])
                     job_procs.remove(proc)
                     # Explicitly close Popen object's file descriptors to prevent leaks
-                    # Even though stdout/stderr are DEVNULL, Popen holds file descriptors
                     try:
                         if proc.stdout:
                             proc.stdout.close()
@@ -139,7 +138,6 @@ def main(args):
                         if proc.stdin:
                             proc.stdin.close()
                     except Exception:
-                        # Ignore errors when closing (process may have already closed them)
                         pass
             job = connection.reserve(timeout=60)
             if job is None:
@@ -221,7 +219,6 @@ def main(args):
             run_args.extend(["--job-config", job_config_path])
 
             try:
-                print("run_args", run_args)
                 # Use start_new_session=True to ensure child processes are isolated
                 # from the dispatcher's process group. This prevents accidental
                 # termination if the dispatcher crashes or receives signals.
@@ -254,13 +251,13 @@ def main(args):
                 job.delete()
             except Exception:
                 log.exception("Saw exception while trying to delete job")
-            
+
             # Successful iteration - reset loop exit counter if it was set
             if loop_exit_count > 0:
                 log.info("Successfully completed iteration after LoopExit exception(s). Resetting counter.")
                 loop_exit_count = 0
-                
-        except LoopExit as e:
+
+        except LoopExit:
             loop_exit_count += 1
             log.critical(
                 "CRITICAL: Caught gevent LoopExit exception in dispatcher main loop "
@@ -271,7 +268,7 @@ def main(args):
                 max_loop_exits
             )
             log.exception("LoopExit exception details:")
-            
+
             if loop_exit_count >= max_loop_exits:
                 log.critical(
                     "Maximum LoopExit exceptions (%d) reached. "
@@ -282,10 +279,10 @@ def main(args):
                 # They should continue independently due to start_new_session=True
                 log.info("Dispatched %d job supervisor processes that should continue running independently", len(job_procs))
                 break
-            
+
             # Continue to next iteration to attempt recovery
             continue
-            
+
         except Exception as e:
             log.critical(
                 "CRITICAL: Uncaught exception in dispatcher main loop: %s",

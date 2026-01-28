@@ -11,6 +11,8 @@ RUN apt-get update && \
     python3-pip \
     python3-venv \
     vim \
+    jq \
+    curl \
     libev-dev \
     libvirt-dev \
     libffi-dev \
@@ -29,7 +31,7 @@ RUN \
     PIP_INSTALL_FLAGS="-r requirements.txt" ./bootstrap
 COPY . /teuthology
 RUN \
-    git config -f ./.git/config --unset 'http.https://github.com/.extraheader' && \
+    (git config -f ./.git/config --unset 'http.https://github.com/.extraheader' || true ) && \
     ./bootstrap
 COPY containers/teuthology-dev/containerized_node.yaml /teuthology
 COPY containers/teuthology-dev/.teuthology.yaml /root
