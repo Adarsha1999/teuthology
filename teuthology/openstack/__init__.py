@@ -48,6 +48,30 @@ from teuthology.orchestra import connection
 from teuthology import misc
 from openstack import connection as openstack_connection
 
+# Use gevent's thread pool to run blocking subprocess operations
+# This prevents gevent.exceptions.LoopExit when misc.sh() blocks in gevent greenlets
+try:
+    from gevent.threadpool import ThreadPool
+    _subprocess_pool = ThreadPool(maxsize=10)
+except ImportError:
+    # Fallback if gevent is not available (shouldn't happen in normal operation)
+    _subprocess_pool = None
+
+def _threaded_sh(command, **kwargs):
+    """
+    Execute misc.sh() in a thread pool to avoid blocking gevent event loop.
+    
+    This prevents gevent.exceptions.LoopExit when misc.sh() is called
+    from within a gevent greenlet. The blocking subprocess operation runs in a
+    separate thread, allowing the gevent event loop to continue processing other greenlets.
+    """
+    if _subprocess_pool is not None:
+        # Run in gevent thread pool - this doesn't block the event loop
+        return _subprocess_pool.apply(misc.sh, (command,), kwargs)
+    else:
+        # Fallback if thread pool is not available (shouldn't happen in normal operation)
+        return misc.sh(command, **kwargs)
+
 
 from yaml.representer import SafeRepresenter
 
@@ -77,7 +101,7 @@ def enforce_json_dictionary(something):
 
 class OpenStackInstance(object):
 
-    def __init__(self, name_or_id, info=None):
+    def __init__(self, name_or_id, info=None, raise_on_error=True):
         self.name_or_id = name_or_id
         self.private_or_floating_ip = None
         self.private_ip = None
@@ -91,7 +115,11 @@ class OpenStackInstance(object):
             errmsg = 'VM creation failed'
             if 'message' in self.info:
                 errmsg = '{}: {}'.format(errmsg, self.info['message'])
-            raise Exception(errmsg)
+            if raise_on_error:
+                raise Exception(errmsg)
+            else:
+                # Log warning but don't raise - allows cleanup to proceed
+                log.warning("OpenStackInstance %s is in ERROR state: %s", name_or_id, errmsg)
 
     def _create_connection(self):
         return openstack_connection.from_config(cloud=None)
@@ -101,8 +129,24 @@ class OpenStackInstance(object):
             server = self.conn.compute.find_server(self.name_or_id)
             if server:
                 self.info = {k.lower(): v for k, v in server.to_dict().items()}
-        except CalledProcessError:
+                log.debug("Found server %s: id=%s, name=%s, status=%s", 
+                         self.name_or_id, 
+                         self.info.get('id'), 
+                         self.info.get('name'),
+                         self.info.get('status'))
+            else:
+                # Server not found - find_server returns None if not found
+                self.info = None
+                log.warning("Server %s not found in OpenStack (find_server returned None)", 
+                           self.name_or_id)
+        except CalledProcessError as e:
             self.info = None
+            log.warning("CalledProcessError finding server %s: %s", self.name_or_id, e)
+        except Exception as e:
+            # Catch all other exceptions since openstacksdk may raise various exceptions
+            self.info = None
+            log.warning("Exception finding server %s (type=%s): %s", 
+                       self.name_or_id, type(e).__name__, e)
 
     def __getitem__(self, name):
         return self.info[name.lower()]
@@ -200,15 +244,19 @@ class OpenStackInstance(object):
         Delete the name_or_id OpenStack instance.
         """
         if not self.exists():
+            log.warning("Cannot destroy server %s: server not found (exists() returned False). "
+                       "This may happen when a run is dead and cleanup is attempted.", 
+                       self.name_or_id)
             return True
         volumes = self.get_volumes()
-        log.info("OpenStackInstance.destroy: %s volumes: %s", self.name_or_id, volumes)
+        log.info("Deleting instance " + self['id'] + " with volumes " +
+                 str(volumes))
         OpenStack().run("server set --name REMOVE-ME-" + self.name_or_id +
                         " " + self['id'])
         OpenStack().run("server delete --wait " + self['id'] +
                         " || true")
         for volume in volumes:
-            log.info("OpenStackInstance.destroy: deleting volume %s", volume)
+            log.info("Deleting volume " + volume)
             OpenStack().volume_delete(volume)
         return True
 
@@ -277,7 +325,7 @@ class OpenStack(object):
         if OpenStack.token is None:
             if 'OS_TOKEN_VALUE' in os.environ:
                 del os.environ['OS_TOKEN_VALUE']
-            OpenStack.token = misc.sh("openstack -q token issue -c id -f value").strip()
+            OpenStack.token = _threaded_sh("openstack -q token issue -c id -f value").strip()
             os.environ['OS_TOKEN_VALUE'] = OpenStack.token
             OpenStack.token_expires = int(time.time() + OpenStack.token_cache_duration)
             os.environ['OS_TOKEN_EXPIRES'] = str(OpenStack.token_expires)
@@ -319,7 +367,7 @@ class OpenStack(object):
             cmd = "openstack --quiet " + cmd
         try:
             log.info(f"running cmd {cmd}")
-            status = misc.sh(cmd)
+            status = _threaded_sh(cmd)
         finally:
             if 'OS_TOKEN' in os.environ:
                 del os.environ['OS_TOKEN']
@@ -399,11 +447,11 @@ class OpenStack(object):
         """
         Upload an image into OpenStack
         """
-        misc.sh("wget -c -O " + name + ".qcow2 " + self.image2url[name])
+        _threaded_sh("wget -c -O " + name + ".qcow2 " + self.image2url[name])
         if self.get_provider() == 'dreamhost':
             image = name + ".raw"
             disk_format = 'raw'
-            misc.sh("qemu-img convert " + name + ".qcow2 " + image)
+            _threaded_sh("qemu-img convert " + name + ".qcow2 " + image)
         else:
             image = name + ".qcow2"
             disk_format = 'qcow2'
@@ -421,7 +469,7 @@ class OpenStack(object):
         else:
             properties = []
 
-        misc.sh("openstack image create --property ownedby=teuthology " +
+        _threaded_sh("openstack image create --property ownedby=teuthology " +
                 " ".join(properties) +
                 " --disk-format=" + disk_format + " --container-format=bare " +
                 " --private" +
@@ -701,6 +749,7 @@ class OpenStack(object):
         return self.get_available_archs()[0]
 
     def volume_delete(self, name_or_id):
+        log.info("Deleting volume " + name_or_id)
         self.run("volume set --name REMOVE-ME " + name_or_id + " || true")
         self.run("volume delete " + name_or_id + " || true")
 
@@ -796,7 +845,7 @@ class TeuthologyOpenStack(OpenStack):
             aug_fp=remote_fp,
         ))
         try:
-            misc.sh(command)
+            _threaded_sh(command)
         except:
             pass
         else:
@@ -810,7 +859,7 @@ class TeuthologyOpenStack(OpenStack):
         command = ssh_command("mkdir -p {aug_dn}".format(
             aug_dn=remote_dn,
         ))
-        misc.sh(command) # will throw exception on failure
+        _threaded_sh(command) # will throw exception on failure
         command = "scp {o} -i {k} {yamlfile} {m}:{dn}".format(
             o=sshopts,
             k=self.key_filename,
@@ -818,7 +867,7 @@ class TeuthologyOpenStack(OpenStack):
             m=machine,
             dn=remote_dn,
         )
-        misc.sh(command) # will throw exception on failure
+        _threaded_sh(command) # will throw exception on failure
         return remote_fp
 
     def _repos_from_file(self, path):
@@ -1301,10 +1350,10 @@ ssh access           : ssh {identity}{username}@{ip} # logs in /usr/share/nginx/
         if not worker_sg:
             worker_sg = conn.network.create_security_group(name=self.worker_group())
 
-        def add_rule(sg_id, protocol, port, remote_group_id=None):
+        def add_rule(sg_id, protocol, port, remote_group_id=None, direction='ingress'):
             rule_args = {
                 'security_group_id': sg_id,
-                'direction': 'ingress',
+                'direction': direction,
                 'protocol': protocol,
                 'port_range_min': port,
                 'port_range_max': port,
@@ -1323,6 +1372,13 @@ ssh access           : ssh {identity}{username}@{ip} # logs in /usr/share/nginx/
         # Rules for SSH, log, pulpito, paddles
         for port in (22, 80, 8080, 8081):
             add_rule(server_sg.id, 'tcp', port)
+
+        # Rules for NTP (UDP port 123) - allow both ingress and egress for NTP synchronization
+        # Egress allows VMs to query external NTP servers, ingress allows receiving responses
+        add_rule(server_sg.id, 'udp', 123, direction='egress')
+        add_rule(worker_sg.id, 'udp', 123, direction='egress')
+        add_rule(server_sg.id, 'udp', 123, direction='ingress')
+        add_rule(worker_sg.id, 'udp', 123, direction='ingress')
 
         # Rules for communication between teuthology and workers
         for port in (65535,):

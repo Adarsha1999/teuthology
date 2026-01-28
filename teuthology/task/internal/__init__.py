@@ -543,8 +543,12 @@ def archive_upload(ctx, config):
                 ssh = ''
             split_path = archive_path.split('/')
             split_path.insert(-2, '.')
-            misc.sh(ssh + " rsync -avz --relative /" +
-                    os.path.join(*split_path) + " " +
-                    upload)
+            # Use 10 minute timeout for archive upload to prevent hanging
+            try:
+                misc.sh(ssh + " rsync -avz --relative /" +
+                        os.path.join(*split_path) + " " +
+                        upload, timeout=600)
+            except subprocess.TimeoutExpired:
+                log.error('Archive upload timed out after 10 minutes. Continuing with teardown.')
         else:
             log.info('Not uploading archives.')

@@ -1213,11 +1213,19 @@ def is_in_dict(searchkey, searchval, d):
         return searchval == val
 
 
-def sh(command, log_limit=1024, cwd=None, env=None):
+def sh(command, log_limit=1024, cwd=None, env=None, timeout=None):
     """
     Run the shell command and return the output in ascii (stderr and
     stdout).  If the command fails, raise an exception. The command
     and its output are logged, on success and on error.
+    
+    :param command: The shell command to run
+    :param log_limit: Maximum length of log lines before truncation
+    :param cwd: Working directory for the command
+    :param env: Environment variables for the command
+    :param timeout: Maximum time in seconds to wait for command completion.
+                   If None, wait indefinitely. If timeout is exceeded,
+                   raises subprocess.TimeoutExpired.
     """
     log.info(":sh: " + command)
     env = env or os.environ.copy()
@@ -1232,8 +1240,15 @@ def sh(command, log_limit=1024, cwd=None, env=None):
     lines = []
     truncated = False
     log.info("subprocess", proc.__dict__)
+    start_time = time.time()
     with proc.stdout:
         for line in proc.stdout:
+            if timeout is not None:
+                elapsed = time.time() - start_time
+                if elapsed > timeout:
+                    proc.kill()
+                    proc.wait()
+                    raise subprocess.TimeoutExpired(command, timeout)
             line = line.decode()
             lines.append(line)
             line = line.rstrip()
@@ -1245,7 +1260,25 @@ def sh(command, log_limit=1024, cwd=None, env=None):
             else:
                 log.debug(line)
     output = "".join(lines)
-    if proc.wait() != 0:
+    # Wait for process to finish, with timeout check
+    if timeout is not None:
+        remaining_time = timeout - (time.time() - start_time)
+        if remaining_time <= 0:
+            proc.kill()
+            proc.wait()
+            raise subprocess.TimeoutExpired(command, timeout)
+        # Use a polling approach to check timeout while waiting
+        poll_interval = min(0.1, remaining_time / 10)
+        while proc.poll() is None:
+            elapsed = time.time() - start_time
+            if elapsed > timeout:
+                proc.kill()
+                proc.wait()
+                raise subprocess.TimeoutExpired(command, timeout)
+            time.sleep(poll_interval)
+    else:
+        proc.wait()
+    if proc.returncode != 0:
         if truncated:
             log.error(command + " replay full stdout/stderr"
                       " because an error occurred and some of"

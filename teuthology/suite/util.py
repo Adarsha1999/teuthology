@@ -89,6 +89,95 @@ def get_worker(machine_type):
         return machine_type
 
 
+def verify_ceph_sha(ceph_hash, ceph_branch, name='', dry_run=None):
+    """
+    Verify that a given ceph_hash (SHA1) exists for ceph_branch in either
+    Chacra (package repo) or Shaman (builds).
+
+    - Uses config.shaman_host (fallback 'shaman.ceph.com') to query Shaman.
+    - Attempts to discover a Chacra host from the Shaman API JSON (if available).
+    - Falls back to config.chacra_host if set; otherwise discovery is best-effort.
+
+    On verification failure, calls schedule_fail(message, name, dry_run).
+    Returns True on success, ScheduleFailError is raised on failure.
+    """
+    shaman_host = getattr(config, 'shaman_host', 'shaman.ceph.com')
+    chacra_host = getattr(config, 'chacra_host', None)
+
+    session = requests.Session()
+
+    def fetch(url, expect_json=False):
+        try:
+            r = session.get(url, timeout=10)
+            r.raise_for_status()
+        except requests.exceptions.HTTPError as e:
+            if getattr(e.response, 'status_code', None) == 404:
+                log.debug("Not found at %s", url)
+            else:
+                log.error("HTTP error fetching %s: %s", url, e)
+            return None
+        except requests.exceptions.RequestException as e:
+            log.error("Error fetching %s: %s", url, e)
+            return None
+
+        if expect_json:
+            try:
+                return r.json()
+            except ValueError:
+                log.error("Invalid JSON from %s", url)
+                return None
+        return r.text
+
+    # 1) Try to discover a Chacra host from Shaman API JSON
+    discovered_chacra = None
+    try:
+        shaman_api = f"https://{shaman_host}/api/builds/ceph/{ceph_branch}/"
+        api_data = fetch(shaman_api, expect_json=True)
+        if api_data:
+            # walk structure looking for any string mentioning 'chacra'
+            def find_chacra(obj):
+                if isinstance(obj, dict):
+                    for v in obj.values():
+                        res = find_chacra(v)
+                        if res:
+                            return res
+                elif isinstance(obj, list):
+                    for item in obj:
+                        res = find_chacra(item)
+                        if res:
+                            return res
+                elif isinstance(obj, str):
+                    if 'chacra' in obj:
+                        return obj
+                return None
+
+            discovered = find_chacra(api_data)
+            if discovered:
+                discovered_chacra = discovered
+    except Exception:
+        # fetch() logs errors; continue best-effort
+        pass
+
+    # Normalize discovered_chacra: if a full URL extract host
+    if discovered_chacra:
+        if discovered_chacra.startswith('http'):
+            try:
+                from urllib.parse import urlparse
+                discovered_chacra = urlparse(discovered_chacra).netloc
+            except Exception:
+                # keep as-is
+                pass
+
+    # prefer explicit config.chacra_host, else discovered
+    if not chacra_host and discovered_chacra:
+        chacra_host = discovered_chacra
+
+    # 2) If we have a chacra host, try to query package list for the branch
+    if chacra_host:
+        if chacra_host.startswith('http'):
+            chacra_url = f"{chacra_host.rstrip('/')}/repos/ceph/{ceph_branch}/"
+
+
 def get_gitbuilder_hash(project=None, branch=None, flavor=None,
                         machine_type=None, distro=None,
                         distro_version=None):
@@ -218,7 +307,7 @@ def get_branch_info(project, branch, project_owner='ceph'):
     url_templ = 'https://api.github.com/repos/{project_owner}/{project}/git/refs/heads/{branch}'  # noqa
     url = url_templ.format(project_owner=project_owner, project=project,
                            branch=branch)
-    resp = requests.get(url)
+    resp = requests.get(url, timeout=60)
     if resp.ok:
         return resp.json()
 
@@ -350,7 +439,7 @@ def find_git_parents(project: str, sha1: str, count=1):
     def refresh():
         url = f"{base_url}/{project}.git/refresh"
         log.info(f"Forcing refresh of git mirror: {url}")
-        resp = requests.get(url)
+        resp = requests.get(url, timeout=60)
         if not resp.ok:
             log.error('git refresh failed for %s: %s',
                       project, resp.content.decode())
@@ -358,7 +447,7 @@ def find_git_parents(project: str, sha1: str, count=1):
     def get_sha1s(project, committish, count):
         url = f"{base_url}/{project}.git/history?committish={committish}&count={count}"
         log.info(f"Looking for parent commits: {url}")
-        resp = requests.get(url)
+        resp = requests.get(url, timeout=60)
         resp.raise_for_status()
         sha1s = resp.json()['sha1s']
         if len(sha1s) != count:

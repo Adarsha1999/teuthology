@@ -17,6 +17,29 @@ from teuthology.config import config
 from teuthology.contextutil import safe_while
 from teuthology.exceptions import QuotaExceededError
 
+# Use gevent's thread pool to run blocking subprocess operations
+# This prevents gevent.exceptions.LoopExit when misc.sh() blocks in gevent greenlets
+try:
+    from gevent.threadpool import ThreadPool
+    _subprocess_pool = ThreadPool(maxsize=10)
+except ImportError:
+    # Fallback if gevent is not available (shouldn't happen in normal operation)
+    _subprocess_pool = None
+
+def _threaded_sh(command, **kwargs):
+    """
+    Execute misc.sh() in a thread pool to avoid blocking gevent event loop.
+    
+    This prevents gevent.exceptions.LoopExit when misc.sh() is called
+    from within a gevent greenlet. The blocking subprocess operation runs in a
+    separate thread, allowing the gevent event loop to continue processing other greenlets.
+    """
+    if _subprocess_pool is not None:
+        # Run in gevent thread pool - this doesn't block the event loop
+        return _subprocess_pool.apply(misc.sh, (command,), kwargs)
+    else:
+        # Fallback if thread pool is not available (shouldn't happen in normal operation)
+        return misc.sh(command, **kwargs)
 
 log = logging.getLogger(__name__)
 
@@ -48,7 +71,7 @@ class ProvisionOpenStack(OpenStack):
         template_path = config['openstack']['user-data'].format(
             os_type=os_type,
             os_version=os_version)
-        log.info("From init_user_data" + str(template_path))
+        log.info("Using user-data template: %s, %s, %s", template_path, os_type, os_version)
         nameserver = config['openstack'].get('nameserver', '8.8.8.8')
         user_data_template = open(template_path).read()
         user_data = user_data_template.format(
@@ -63,7 +86,7 @@ class ProvisionOpenStack(OpenStack):
         # bugous for volume create as of openstackclient 3.2.0
         # https://bugs.launchpad.net/python-openstackclient/+bug/1619726
         #r = OpenStack().run("%s -f json " % command)
-        json_result = misc.sh("openstack %s -f json" % subcommand)
+        json_result = _threaded_sh("openstack %s -f json" % subcommand)
         if 'No volume with a name or ID' in json_result:
             return json_result
         r = json.loads(json_result)
@@ -125,7 +148,7 @@ class ProvisionOpenStack(OpenStack):
                         action="add volume " + volume_id) as proceed:
             while proceed():
                 try:
-                    misc.sh("openstack server add volume " + name + " " + volume_id)
+                    _threaded_sh("openstack server add volume " + name + " " + volume_id)
                     break
                 except subprocess.CalledProcessError:
                     log.warning("openstack add volume failed unexpectedly; retrying")
@@ -215,13 +238,28 @@ class ProvisionOpenStack(OpenStack):
         )
         log.info("Matched instances: %s", filtered)
 
-        instances = [OpenStackInstance(i['ID']) for i in filtered]
-        log.info("IDs: %s", instances)
+        # Create OpenStackInstance objects, handling ERROR state VMs gracefully
+        instances = []
+        error_instances = []
+        for i in filtered:
+            try:
+                instance = OpenStackInstance(i['ID'], raise_on_error=True)
+                instances.append(instance)
+            except Exception as e:
+                # If instance is in ERROR state, create it without raising to allow cleanup
+                log.warning("Instance %s is in ERROR state, will be cleaned up: %s", i['ID'], e)
+                error_instance = OpenStackInstance(i['ID'], raise_on_error=False)
+                error_instances.append(error_instance)
+                instances.append(error_instance)  # Include in list for cleanup
+        
+        log.info("IDs: %s (including %d ERROR state instances)", instances, len(error_instances))
         fqdns = []
         try:
             network = config['openstack'].get('network', '')
             log.info("networks: {}".format(network))
-            for instance in instances:
+            # Process only non-ERROR instances (ERROR instances will be cleaned up in finally block)
+            valid_instances = [inst for inst in instances if inst not in error_instances]
+            for instance in valid_instances:
                 ip = instance.get_ip(network)
                 name = self.ip2name(self.basename, ip)
                 self.run("server set " +
@@ -229,7 +267,7 @@ class ProvisionOpenStack(OpenStack):
                          instance['ID'])
                 fqdn = f"ip-{ip.replace('.', '-')}.{config['lab_domain']}"
                 if not misc.ssh_keyscan_wait(fqdn):
-                    console_log = misc.sh("openstack console log show %s "
+                    console_log = _threaded_sh("openstack console log show %s "
                                           "|| true" % instance['ID'])
                     log.error(console_log)
                     raise ValueError('ssh_keyscan_wait failed for ' + fqdn)
@@ -241,20 +279,36 @@ class ProvisionOpenStack(OpenStack):
                     f"scp -i /home/ubuntu/cephkey /home/ubuntu/cephkey "
                     f"ubuntu@{ip}:/home/ubuntu/.ssh/id_ed25519"
                 )
-                misc.sh(scp_cmd)
+                _threaded_sh(scp_cmd)
                 ssh_cmd = (
                     f"ssh -i /home/ubuntu/cephkey ubuntu@{ip} "
                     f"\"chmod 600 ~/.ssh/id_ed25519 && chown ubuntu:ubuntu ~/.ssh/id_ed25519\""
                 )
-                misc.sh(ssh_cmd)
+                _threaded_sh(ssh_cmd)
                 log.info("Going to attach volumes")
                 self.attach_volumes(name, resources_hint['volumes'])
                 fqdns.append(fqdn)
         except Exception as e:
             log.exception(str(e))
-            for id in [instance['ID'] for instance in instances]:
-                self.destroy(id)
+            # Clean up all instances, including ERROR state ones
+            for instance in instances:
+                try:
+                    instance_id = instance['ID'] if hasattr(instance, '__getitem__') else instance.name_or_id
+                    self.destroy(instance_id)
+                except Exception as destroy_err:
+                    log.warning("Failed to destroy instance %s during cleanup: %s", 
+                              instance_id if 'instance_id' in locals() else 'unknown', destroy_err)
             raise e
+        finally:
+            # Ensure ERROR state instances are always cleaned up, even if no exception occurred
+            for error_instance in error_instances:
+                try:
+                    instance_id = error_instance['ID'] if hasattr(error_instance, '__getitem__') else error_instance.name_or_id
+                    log.info("Cleaning up ERROR state instance: %s", instance_id)
+                    self.destroy(instance_id)
+                except Exception as destroy_err:
+                    log.warning("Failed to destroy ERROR state instance %s: %s", 
+                              instance_id if 'instance_id' in locals() else 'unknown', destroy_err)
         return fqdns
 
     def destroy(self, name_or_id):
@@ -267,8 +321,29 @@ class ProvisionOpenStack(OpenStack):
             ip = ".".join(m.groups())
             prefix = config.openstack.get('name_prefix', 'target')  # e.g. "target"
             resolved = ProvisionOpenStack.ip2name(prefix, ip)       # -> target010000196186
+            log.info("ProvisionOpenStack.destroy: converting %s -> %s (IP: %s)", 
+                    original, resolved, ip)
+        else:
+            log.info("ProvisionOpenStack.destroy: using name as-is: %s", original)
 
         # Use openstacksdk to find the server (UUID) from the *target* name (or UUID)
-
-        log.debug("ProvisionOpenStack.destroy: %s -> %s", original, resolved)
-        return OpenStackInstance(resolved).destroy()
+        # Use raise_on_error=False to allow cleanup of ERROR state instances
+        log.debug("ProvisionOpenStack.destroy: attempting to destroy %s", resolved)
+        try:
+            instance = OpenStackInstance(resolved, raise_on_error=False)
+            result = instance.destroy()
+            if result:
+                log.info("ProvisionOpenStack.destroy: successfully destroyed %s", resolved)
+            else:
+                log.warning("ProvisionOpenStack.destroy: destroy() returned False/None for %s", resolved)
+            return result
+        except Exception as e:
+            log.warning("ProvisionOpenStack.destroy: exception destroying %s: %s", resolved, e)
+            # Try direct deletion via openstack CLI as fallback
+            try:
+                log.info("Attempting direct deletion via openstack CLI for %s", resolved)
+                _threaded_sh(f"openstack server delete --wait {resolved} || true")
+                return True
+            except Exception as cli_err:
+                log.error("ProvisionOpenStack.destroy: CLI deletion also failed for %s: %s", resolved, cli_err)
+                return False

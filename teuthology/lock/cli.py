@@ -58,7 +58,7 @@ def main(ctx):
         else:
             # This condition might never be hit, but it's not clear.
             assert ctx.num_to_lock or ctx.list or ctx.list_targets or \
-                ctx.summary or ctx.brief, \
+                ctx.summary or ctx.brief or ctx.unlock, \
                 'machines must be specified for that operation'
     if ctx.all:
         assert ctx.list or ctx.list_targets or ctx.brief, \
@@ -197,6 +197,9 @@ def main(ctx):
     elif ctx.unlock:
         if ctx.owner is None and user is None:
             user = misc.get_user()
+        if not machines:
+            log.info("No machines to unlock")
+            return 0
         # If none of them are vpm, do them all in one shot
         if not filter(query.is_vm, machines):
             res = ops.unlock_many(machines, user)

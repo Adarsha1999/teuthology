@@ -129,7 +129,15 @@ def destroy_if_vm(
     machine_type = status_info.get('machine_type')
     shortname = decanonicalize_hostname(machine_name)
     if machine_type == 'openstack':
-        return openstack.ProvisionOpenStack().destroy(shortname)
+        try:
+            return openstack.ProvisionOpenStack().destroy(shortname)
+        except Exception as e:
+            # Handle authentication or other OpenStack connection errors gracefully
+            # This can happen during unlock operations when auth is not properly configured
+            log.warning("Failed to destroy OpenStack VM %s (may be due to auth/config issues): %s", 
+                       shortname, e)
+            # Return True to indicate we tried (don't block unlock process)
+            return True
     elif machine_type in cloud.get_types():
         return cloud.get_provisioner(
             machine_type, shortname, None, None).destroy()

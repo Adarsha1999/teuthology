@@ -80,18 +80,20 @@ def lock_many(ctx, num, machine_type, user=None, description=None,
     # all in one shot. If we are passed 'plana,mira,burnupi,vps', do one query
     # for 'plana,mira,burnupi' and one for 'vps'
     machine_types_list = misc.get_multi_machine_types(machine_type)
-    if machine_types_list == ['vps']:
+    downburst_types = teuthology.provision.downburst.get_types()
+    if all(t in downburst_types for t in machine_types_list):
         machine_types = machine_types_list
     elif machine_types_list == ['openstack']:
         return lock_many_openstack(ctx, num, machine_type,
                                    user=user,
                                    description=description,
                                    arch=arch)
-    elif 'vps' in machine_types_list:
-        machine_types_non_vps = list(machine_types_list)
-        machine_types_non_vps.remove('vps')
-        machine_types_non_vps = '|'.join(machine_types_non_vps)
-        machine_types = [machine_types_non_vps, 'vps']
+    elif any(t in downburst_types for t in machine_types_list):
+        the_vps = list(t for t in machine_types_list
+                                        if t in downburst_types)
+        non_vps = list(t for t in machine_types_list
+                                        if not t in downburst_types)
+        machine_types = ['|'.join(non_vps), '|'.join(the_vps)]
     else:
         machine_types_str = '|'.join(machine_types_list)
         machine_types = [machine_types_str, ]
@@ -106,9 +108,9 @@ def lock_many(ctx, num, machine_type, user=None, description=None,
         )
         # Only query for os_type/os_version if non-vps and non-libcloud, since
         # in that case we just create them.
-        vm_types = ['vps'] + teuthology.provision.cloud.get_types()
+        vm_types = downburst_types + teuthology.provision.cloud.get_types()
         reimage_types = teuthology.provision.get_reimage_types()
-        if machine_type not in vm_types + reimage_types:
+        if machine_type not in (vm_types + reimage_types):
             if os_type:
                 data['os_type'] = os_type
             if os_version:
@@ -120,6 +122,7 @@ def lock_many(ctx, num, machine_type, user=None, description=None,
             uri,
             data=json.dumps(data),
             headers={'content-type': 'application/json'},
+            timeout=60,
         )
         if response.ok:
             machines = dict()
@@ -145,7 +148,12 @@ def lock_many(ctx, num, machine_type, user=None, description=None,
                 update_nodes(ok_machs)
                 return ok_machs
             elif reimage and machine_type in reimage_types:
-                return reimage_machines(ctx, machines, machine_type)
+                try:
+                    return reimage_machines(ctx, machines, machine_type)
+                except Exception:
+                    log.exception('Reimaging error. Unlocking machines...')
+                    unlock_many(machines, user)
+                    continue
             return machines
         elif response.status_code == 503:
             log.error('Insufficient nodes available to lock %d %s nodes.',
@@ -162,11 +170,9 @@ def lock_one(name, user=None, description=None):
     if user is None:
         user = misc.get_user()
     request = dict(name=name, locked=True, locked_by=user,
-                   description=description)
-    requests.get(f"{config.lock_server}/nodes/{name}/")
-    log.debug(f"Url: {config.lock_server}/nodes/{name}/")
+                   description=description, up=True)
     uri = os.path.join(config.lock_server, 'nodes', name, 'lock', '')
-    response = requests.put(uri, json.dumps(request))
+    response = requests.put(uri, data=json.dumps(request), timeout=60)
     success = response.ok
     if success:
         log.debug('locked %s as %s', name, user)
@@ -218,6 +224,7 @@ def unlock_many(names, user):
                 uri,
                 data=json.dumps(data),
                 headers={'content-type': 'application/json'},
+                timeout=60,
             )
             if response.ok:
                 log.debug("Unlocked: %s", ', '.join(names))
@@ -247,7 +254,7 @@ def unlock_one(name, user, description=None, status: Union[dict, None] = None) -
             sleep=1, increment=0.5, action="unlock %s" % name) as proceed:
         while proceed():
             try:
-                response = requests.put(uri, json.dumps(request))
+                response = requests.put(uri, data=json.dumps(request), timeout=60)
                 if response.ok:
                     log.info('unlocked: %s', name)
                     return response.ok
@@ -283,7 +290,8 @@ def update_lock(name, description=None, status=None, ssh_pub_key=None):
             while proceed():
                 response = requests.put(
                     uri,
-                    json.dumps(updated))
+                    data=json.dumps(updated),
+                    timeout=60)
                 if response.ok:
                     return True
         return response.ok
@@ -308,16 +316,18 @@ def update_inventory(node_dict):
         while proceed():
             response = requests.put(
                 uri,
-                json.dumps(node_dict),
+                data=json.dumps(node_dict),
                 headers={'content-type': 'application/json'},
+                timeout=60,
             )
             if response.status_code == 404:
                 log.info("Creating new node %s on lock server", name)
                 uri = os.path.join(config.lock_server, 'nodes', '')
                 response = requests.post(
                     uri,
-                    json.dumps(node_dict),
+                    data=json.dumps(node_dict),
                     headers={'content-type': 'application/json'},
+                    timeout=60,
                 )
             if response.ok:
                 return

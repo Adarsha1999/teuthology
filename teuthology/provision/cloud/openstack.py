@@ -304,7 +304,7 @@ class OpenStackProvisioner(base.Provisioner):
             config.nsupdate_url,
             query,
         )
-        resp = requests.get(nsupdate_url)
+        resp = requests.get(nsupdate_url, timeout=60)
         resp.raise_for_status()
 
     def _wait_for_ready(self):

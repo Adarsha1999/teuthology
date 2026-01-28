@@ -244,7 +244,7 @@ def _get_repos_to_use(base_url, repos):
     repod = dict()
     for repo in repos:
         repo_to_use = base_url + "compose/" + repo + "/x86_64/os/"
-        r = requests.get(repo_to_use)
+        r = requests.get(repo_to_use, timeout=60)
         log.info("Checking %s", repo_to_use)
         if r.status_code == 200:
             log.info("Using %s", repo_to_use)

@@ -156,6 +156,13 @@ def run_job(job_config, teuth_bin_path, archive_dir, verbose):
             run_with_watchdog(p, job_config)
         except Exception:
             log.exception("run_with_watchdog had an unhandled exception")
+            # Ensure cleanup happens even if watchdog crashes
+            if 'targets' in job_config:
+                log.info('Watchdog exception: ensuring cleanup via unlock_targets')
+                try:
+                    unlock_targets(job_config)
+                except Exception as e:
+                    log.exception('Failed to unlock targets after watchdog exception: %s', e)
             raise
     else:
         log.info("Running without watchdog")
@@ -169,7 +176,11 @@ def run_job(job_config, teuth_bin_path, archive_dir, verbose):
     else:
         log.info('Success!')
     if 'targets' in job_config:
-        unlock_targets(job_config)
+        log.info('Ensuring cleanup via unlock_targets after job completion')
+        try:
+            unlock_targets(job_config)
+        except Exception as e:
+            log.exception('Failed to unlock targets: %s', e)
     return p.returncode
 
 def failure_is_reimage(failure_reason):
@@ -193,7 +204,7 @@ def check_for_reimage_failures_and_mark_down(targets, count=10):
             base_url,
             '/nodes/{0}/jobs/?count={1}'.format(machine, count)
         )
-        resp = requests.get(url)
+        resp = requests.get(url, timeout=60)
         jobs = resp.json()
         if len(jobs) < count:
             continue
@@ -266,6 +277,7 @@ def unlock_targets(job_config):
             continue
         locked.append(name)
     if not locked:
+        log.info('No machines to unlock (already unlocked or unlocked during teardown)')
         return
     if job_config.get("unlock_on_failure", True):
         log.info('Unlocking machines...')
@@ -324,7 +336,12 @@ def run_with_watchdog(process, job_config):
             report.try_push_job_info(job_info)
         except MaxWhileTries:
             log.exception("Failed to report job status; ignoring")
-        time.sleep(teuth_config.watchdog_interval)
+        except Exception as e:
+            # Catch all exceptions to prevent watchdog from dying
+            # The watchdog must stay alive to monitor the job process
+            log.exception("Error in watchdog status update (continuing): %s", e)
+        import gevent
+        gevent.sleep(teuth_config.watchdog_interval)
 
     # we no longer support testing theses old branches
     assert(job_config.get('teuthology_branch') not in ('argonaut', 'bobtail',
@@ -339,6 +356,14 @@ def run_with_watchdog(process, job_config):
         extra_info['failure_reason'] = 'hit max job timeout'
     if not (job_config.get('first_in_suite') or job_config.get('last_in_suite')):
         report.try_push_job_info(job_info, extra_info)
+    
+    # Ensure cleanup happens when process exits
+    if 'targets' in job_config:
+        log.info('Process exited, ensuring cleanup via unlock_targets')
+        try:
+            unlock_targets(job_config)
+        except Exception as e:
+            log.exception('Failed to unlock targets during cleanup: %s', e)
 
 
 def create_fake_context(job_config, block=False):

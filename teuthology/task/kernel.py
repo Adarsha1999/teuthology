@@ -244,7 +244,7 @@ def install_firmware(ctx, config):
         package_type = role_remote.os.package_type
         if package_type == 'rpm':
             role_remote.run(args=[
-                'sudo', 'yum', 'upgrade', '-y', 'linux-firmware',
+                'sudo', 'yum', 'install', '-y', 'linux-firmware',
             ])
             continue
         log.info('Installing linux-firmware on {role}...'.format(role=role))

@@ -30,3 +30,11 @@ docs/teuthology.*.rst
 .vscode/
 
 .ansible
+
+# Local logs / cron outputs
+/logs/*.log
+/teuthology-cadence.log
+
+# Never commit private keys
+/teuthology/openstack/archive-key
+/teuthology/openstack/archive-key.pub

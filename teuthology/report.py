@@ -17,6 +17,7 @@ from teuthology.job_status import get_status, set_status
 report_exceptions = (requests.exceptions.RequestException, socket.error)
 
 
+
 def init_logging():
     """
     Set up logging for the module
@@ -253,8 +254,9 @@ class ResultsReporter(object):
         ))
         if jobs:
             if not self.refresh:
-                response = self.session.head("{base}/runs/{name}/".format(
-                    base=self.base_uri, name=run_name))
+                response = self.session.head(
+                    "{base}/runs/{name}/".format(base=self.base_uri, name=run_name)
+                )
                 if response.status_code == 200:
                     self.log.info("    already present; skipped")
                     return 0
@@ -370,7 +372,7 @@ class ResultsReporter(object):
             if 'job_id' not in fields:
                 fields.append('job_id')
             uri += "?fields=" + ','.join(fields)
-        response = self.session.get(uri)
+        response = self.session.get(uri, timeout=60)
         response.raise_for_status()
         return response.json()
 
@@ -385,7 +387,7 @@ class ResultsReporter(object):
         uri = "{base}/runs/{name}".format(base=self.base_uri, name=run_name)
         if fields:
             uri += "?fields=" + ','.join(fields)
-        response = self.session.get(uri)
+        response = self.session.get(uri, timeout=60)
         response.raise_for_status()
         return response.json()
 
@@ -433,7 +435,7 @@ class ResultsReporter(object):
         """
         uri = "{base}/runs/{name}/jobs/{job_id}/".format(
             base=self.base_uri, name=run_name, job_id=job_id)
-        response = self.session.delete(uri)
+        response = self.session.delete(uri, timeout=60)
         response.raise_for_status()
 
     def delete_jobs(self, run_name, job_ids):
@@ -454,7 +456,7 @@ class ResultsReporter(object):
         """
         uri = "{base}/runs/{name}/".format(
             base=self.base_uri, name=run_name)
-        response = self.session.delete(uri)
+        response = self.session.delete(uri, timeout=60)
         response.raise_for_status()
 
 

@@ -152,6 +152,7 @@ def config_merge(configs, suite_name=None, **kwargs):
                 env['suite_name'] = suite_name
                 env['yaml'] = yaml_complete_obj
                 env['yaml_fragment'] = yaml_fragment_obj
+                env['exact_match'] = kwargs.get('exact_match', False)
                 for k,v in kwargs.items():
                     env[k] = v
                 if not script():

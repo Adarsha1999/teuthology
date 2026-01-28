@@ -59,6 +59,7 @@ def build_matrix(path, subset=None, no_nested_subset=False, seed=None):
     if no_nested_subset:
         log.info("no_nested_subset")
     random.seed(seed)
+    # import pdb; pdb.set_trace();
     mat, first, matlimit = _get_matrix(path, subset, no_nested_subset)
     return generate_combinations(path, mat, first, matlimit)
 

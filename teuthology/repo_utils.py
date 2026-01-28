@@ -14,6 +14,30 @@ from teuthology.config import config
 from teuthology.contextutil import MaxWhileTries, safe_while
 from teuthology.exceptions import BootstrapError, BranchNotFoundError, CommitNotFoundError, GitError
 
+# Use gevent's thread pool to run blocking subprocess operations
+# This prevents gevent.exceptions.LoopExit when misc.sh() blocks in gevent greenlets
+try:
+    from gevent.threadpool import ThreadPool
+    _subprocess_pool = ThreadPool(maxsize=10)
+except ImportError:
+    # Fallback if gevent is not available (shouldn't happen in normal operation)
+    _subprocess_pool = None
+
+def _threaded_sh(command, **kwargs):
+    """
+    Execute misc.sh() in a thread pool to avoid blocking gevent event loop.
+    
+    This prevents gevent.exceptions.LoopExit when misc.sh() is called
+    from within a gevent greenlet. The blocking subprocess operation runs in a
+    separate thread, allowing the gevent event loop to continue processing other greenlets.
+    """
+    if _subprocess_pool is not None:
+        # Run in gevent thread pool - this doesn't block the event loop
+        return _subprocess_pool.apply(misc.sh, (command,), kwargs)
+    else:
+        # Fallback if thread pool is not available (shouldn't happen in normal operation)
+        return misc.sh(command, **kwargs)
+
 log = logging.getLogger(__name__)
 
 
@@ -216,12 +240,12 @@ def fetch_refspec(ref):
 def clone_repo_ref(repo_url, dest_path, ref):
     branch_name = local_branch_from_ref(ref)
     remote_ref = remote_ref_from_ref(ref)
-    misc.sh('git init %s' % dest_path)
-    misc.sh('git remote add origin %s' % repo_url, cwd=dest_path)
-    #misc.sh('git fetch --depth 1 origin %s' % fetch_refspec(ref),
+    _threaded_sh('git init %s' % dest_path)
+    _threaded_sh('git remote add origin %s' % repo_url, cwd=dest_path)
+    #_threaded_sh('git fetch --depth 1 origin %s' % fetch_refspec(ref),
     #                                                        cwd=dest_path)
     fetch_branch(dest_path, ref)
-    misc.sh('git checkout -b %s %s' % (branch_name, remote_ref),
+    _threaded_sh('git checkout -b %s %s' % (branch_name, remote_ref),
                                                             cwd=dest_path)
 
 
@@ -234,14 +258,10 @@ def set_remote(repo_path, repo_url):
     :raises:          GitError if the operation fails
     """
     log.debug("Setting repo remote to %s", repo_url)
-    proc = subprocess.Popen(
-        ('git', 'remote', 'set-url', 'origin', repo_url),
-        cwd=repo_path,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT)
-    if proc.wait() != 0:
-        out = proc.stdout.read()
-        log.error(out)
+    try:
+        _threaded_sh('git remote set-url origin %s' % repo_url, cwd=repo_path)
+    except subprocess.CalledProcessError as e:
+        log.error(e.output if hasattr(e, 'output') else str(e))
         raise GitError("git remote set-url failed!")
 
 
@@ -253,13 +273,10 @@ def fetch(repo_path):
     :raises:          GitError if the operation fails
     """
     log.info("Fetching from upstream into %s", repo_path)
-    proc = subprocess.Popen(
-        ('git', 'fetch', '-p', 'origin'),
-        cwd=repo_path,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT)
-    if proc.wait() != 0:
-        out = proc.stdout.read().decode()
+    try:
+        _threaded_sh('git fetch -p origin', cwd=repo_path)
+    except subprocess.CalledProcessError as e:
+        out = e.output if hasattr(e, 'output') else str(e)
         log.error(out)
         raise GitError("git fetch failed!")
 
@@ -276,18 +293,16 @@ def fetch_branch(repo_path, branch, shallow=True):
     """
     validate_branch(branch)
     log.info("Fetching %s from origin", repo_path.split("/")[-1])
-    args = ['git', 'fetch']
+    cmd_parts = ['git', 'fetch']
     if shallow:
-        args.extend(['--depth', '1'])
-    args.extend(['-p', 'origin', fetch_refspec(branch)])
-    proc = subprocess.Popen(
-        args,
-        cwd=repo_path,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT)
-    if proc.wait() != 0:
+        cmd_parts.extend(['--depth', '1'])
+    cmd_parts.extend(['-p', 'origin', fetch_refspec(branch)])
+    cmd = ' '.join(cmd_parts)
+    try:
+        _threaded_sh(cmd, cwd=repo_path)
+    except subprocess.CalledProcessError as e:
         not_found_str = "fatal: couldn't find remote ref %s" % branch
-        out = proc.stdout.read().decode()
+        out = e.output if hasattr(e, 'output') else str(e)
         log.error(out)
         if not_found_str in out.lower():
             raise BranchNotFoundError(branch)
@@ -316,10 +331,7 @@ def reset_repo(repo_url, dest_path, branch, commit=None):
     # This try/except block will notice if the requested branch doesn't
     # exist, whether it was cloned or fetched.
     try:
-        subprocess.check_output(
-            ('git', 'reset', '--hard', reset_ref),
-            cwd=dest_path,
-        )
+        _threaded_sh('git reset --hard %s' % reset_ref, cwd=dest_path)
     except subprocess.CalledProcessError:
         if commit:
             raise CommitNotFoundError(commit, repo_url)

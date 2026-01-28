@@ -11,7 +11,6 @@ from teuthology.contextutil import safe_while
 from teuthology.util.compat import urlencode
 from teuthology.util.time import parse_timestamp
 
-
 log = logging.getLogger(__name__)
 
 
@@ -160,7 +159,7 @@ def node_active_job(name: str, status: Union[dict, None] = None, grace_time: int
     with safe_while(
             sleep=1, increment=0.5, action='node_is_active') as proceed:
         while proceed():
-            resp = requests.get(url)
+            resp = requests.get(url, timeout=60)
             if resp.ok:
                 job_obj = resp.json()
                 job_status = job_obj["status"]

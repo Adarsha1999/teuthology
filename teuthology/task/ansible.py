@@ -173,8 +173,15 @@ class Ansible(Task):
         self.generated_playbook = False
         self.log = logging.Logger(__name__)
         if ctx.archive:
-            self.log.addHandler(logging.FileHandler(
-                os.path.join(ctx.archive, "ansible.log")))
+            handler = logging.FileHandler(
+                os.path.join(ctx.archive, "ansible.log"))
+            # Apply log masking filter if enabled
+            try:
+                from teuthology.util.logmask import apply_filter_to_handler
+                apply_filter_to_handler(handler)
+            except ImportError:
+                pass
+            self.log.addHandler(handler)
 
     def setup(self):
         log.info("Setting up ansible")
@@ -219,7 +226,7 @@ class Ansible(Task):
             self.playbook = playbook
         elif isinstance(playbook, str) and playbook.startswith(('http://',
                                                                'https://')):
-            response = requests.get(playbook)
+            response = requests.get(playbook, timeout=60)
             response.raise_for_status()
             self.playbook = yaml.safe_load(response.text)
         elif isinstance(playbook, str):

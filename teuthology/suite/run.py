@@ -1,10 +1,12 @@
 import copy
 import datetime
+import json
 import logging
 import os
 import pwd
 import yaml
 import re
+import requests
 import time
 
 from humanfriendly import format_timespan
@@ -93,13 +95,10 @@ class Run(object):
                     dry_run=self.args.dry_run,
                 )
 
-        self.os = self.choose_os()
         self.kernel_dict = self.choose_kernel()
         ceph_hash = self.choose_ceph_hash()
-        # We don't store ceph_version because we don't use it yet outside of
-        # logging.
-        self.choose_ceph_version(ceph_hash)
         suite_branch = self.choose_suite_branch()
+        self.verify_sha_id(ceph_hash, self.args.ceph_branch)
         suite_hash = self.choose_suite_hash(suite_branch)
         if self.args.suite_dir:
             self.suite_repo_path = self.args.suite_dir
@@ -109,9 +108,12 @@ class Run(object):
         teuthology_branch, teuthology_sha1 = self.choose_teuthology_branch()
 
 
-        if self.args.distro_version:
+        if self.args.distro and self.args.distro_version:
             self.args.distro_version, _ = \
-                OS.version_codename(self.args.distro, self.args.distro_version)
+                OS.version_codename(
+                    self.args.distro,
+                    self.args.distro_version,
+                )
         self.config_input = dict(
             suite=self.args.suite,
             suite_branch=suite_branch,
@@ -122,8 +124,6 @@ class Run(object):
             teuthology_branch=teuthology_branch,
             teuthology_sha1=teuthology_sha1,
             machine_type=self.args.machine_type,
-            distro=self.os.name,
-            distro_version=self.os.version,
             archive_upload=config.archive_upload,
             archive_upload_key=config.archive_upload_key,
             suite_repo=config.get_ceph_qa_suite_git_url(),
@@ -131,6 +131,10 @@ class Run(object):
             flavor=self.args.flavor,
             expire=expires.strftime(TIMESTAMP_FMT) if expires else None,
         )
+        if self.args.distro:
+            self.config_input['os_type'] = self.args.distro.lower()
+        if self.args.distro_version:
+            self.config_input['os_version'] = self.args.distro_version.lower()
         return self.build_base_config()
 
     def get_expiration(self, _base_time: datetime.datetime | None = None) -> datetime.datetime | None:
@@ -160,6 +164,7 @@ class Run(object):
                 self.args.distro, self.args.machine_type)[2]
         else:
             os_ = OS(os_type, os_version)
+        log.info("OS: %s", os_)
         return os_
 
     def choose_kernel(self):
@@ -232,22 +237,48 @@ class Run(object):
         log.info("ceph sha1: {hash}".format(hash=ceph_hash))
         return ceph_hash
 
-    def choose_ceph_version(self, ceph_hash):
-        if config.suite_verify_ceph_hash and not self.args.newest:
-            # don't bother if newest; we'll search for an older one
-            # Get the ceph package version
-            ceph_version = util.package_version_for_hash(
-                ceph_hash, self.args.flavor, self.os.name,
-                self.os.version, self.args.machine_type,
-            )
-            if not ceph_version:
-                msg = f"Packages for os_type '{self.os.name}', flavor " \
-                    f"{self.args.flavor} and ceph hash '{ceph_hash}' not found"
+    def verify_sha_id(self, ceph_hash, ceph_branch):
+        """
+        Verify if a given Ceph version (SHA1) exists in either Chacra or Shaman
+        repositories for the specified branch.
+        """
+        def fetch_url(url, expect_json=False):
+            """Fetch content from a URL, optionally parse JSON."""
+            try:
+                response = requests.get(url, timeout=10)
+                response.raise_for_status()
+            except requests.exceptions.HTTPError as e:
+                if e.response.status_code == 404:
+                    log.debug(f"Branch not found in repository: {url}")
+                else:
+                    log.error(f"Failed to fetch {url}: {e}")
+                return None
+            except requests.exceptions.RequestException as e:
+                log.error(f"Failed to fetch {url}: {e}")
+                return None
+
+            if expect_json:
+                try:
+                    return response.json()
+                except ValueError:
+                    log.error(f"Invalid JSON from {url}")
+                    return None
+            return response.text
+            
+        shaman_url = f"https://shaman.ceph.com/builds/ceph/{ceph_branch}/"
+        shaman_html = fetch_url(shaman_url)
+        if shaman_html:
+            sha1s = set(re.findall(r"[0-9a-f]{40}", shaman_html))
+            if ceph_hash not in sha1s:
+                msg = f"Not found in Shaman for branch {ceph_branch}."
                 util.schedule_fail(msg, self.name, dry_run=self.args.dry_run)
-            log.info("ceph version: {ver}".format(ver=ceph_version))
-            return ceph_version
-        else:
-            log.info('skipping ceph package verification')
+
+        chacra_url = f"https://1.chacra.ceph.com/repos/ceph/{ceph_branch}/"
+        chacra_data = fetch_url(chacra_url, expect_json=True)
+        if chacra_data:
+            if ceph_hash not in chacra_data:
+                msg = f"Not found in Chacra for branch {ceph_branch}."
+                util.schedule_fail(msg, self.name, dry_run=self.args.dry_run)
 
     def choose_teuthology_branch(self):
         """Select teuthology branch, check if it is present in repo and return
@@ -472,9 +503,13 @@ class Run(object):
         """
         self.base_args = self.build_base_args()
 
+        # import pdb; pdb.set_trace();
+        # print (f"self.base_args------- : {self.base_args}")
+
         # Make sure the yaml paths are actually valid
         for yaml_path in self.base_yaml_paths:
             full_yaml_path = os.path.join(self.suite_repo_path, yaml_path)
+            
             if not os.path.exists(full_yaml_path):
                 raise IOError("File not found: " + full_yaml_path)
 
@@ -621,6 +656,7 @@ Note: If you still want to go ahead, use --job-threshold 0'''
             'suites',
             self.base_config.suite.replace(':', '/'),
         ))
+        # import pdb; pdb.set_trace();
         log.debug('Suite %s in %s' % (suite_name, suite_path))
         log.debug(f"subset = {self.args.subset}")
         log.debug(f"no_nested_subset = {self.args.no_nested_subset}")
@@ -632,12 +668,14 @@ Note: If you still want to go ahead, use --job-threshold 0'''
                                no_nested_subset=self.args.no_nested_subset,
                                seed=self.args.seed)
         generated = len(configs)
+        print (f"configs------- : {configs}")
         log.info(f'Suite {suite_name} in {suite_path} generated {generated} jobs (not yet filtered or merged)')
         configs = list(config_merge(configs,
             filter_in=self.args.filter_in,
             filter_out=self.args.filter_out,
             filter_all=self.args.filter_all,
             filter_fragments=self.args.filter_fragments,
+            exact_match=getattr(self.args, 'rerun_exact', False),
             base_config=self.base_config,
             seed=self.args.seed,
             suite_name=suite_name))
@@ -716,7 +754,6 @@ Note: If you still want to go ahead, use --job-threshold 0'''
         self.check_num_jobs(len(jobs_to_schedule))
 
         self.schedule_jobs(jobs_missing_packages, jobs_to_schedule, name)
-
         count = len(jobs_to_schedule)
         missing_count = len(jobs_missing_packages)
         total_count = count

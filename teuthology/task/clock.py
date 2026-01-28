@@ -38,6 +38,30 @@ def task(ctx, config):
 
     log.info('Syncing clocks and checking initial clock skew...')
     cluster = filter_out_containers(ctx.cluster)
+    # Fix ntp.conf before running ntpd (Ansible may have overwritten it)
+    # Disable statistics to prevent permission errors that can cause ntpd -gq to hang
+    run.wait(
+        cluster.run(
+            args=[
+                'sudo', 'bash', '-c',
+                'if [ -f /etc/ntp.conf ]; then '
+                'sed -i "/^statsdir /d" /etc/ntp.conf; '
+                'sed -i "/^filegen /d" /etc/ntp.conf; '
+                'fi; '
+                'if getent passwd ntp >/dev/null 2>&1; then '
+                'mkdir -p /var/log/ntpstats && '
+                'chown ntp:ntp /var/log/ntpstats 2>/dev/null || '
+                'chown ntp:adm /var/log/ntpstats 2>/dev/null || '
+                'chmod 775 /var/log/ntpstats 2>/dev/null || true; '
+                'mkdir -p /var/lib/ntp && '
+                'chown ntp:ntp /var/lib/ntp 2>/dev/null || '
+                'chown ntp:adm /var/lib/ntp 2>/dev/null || '
+                'chmod 755 /var/lib/ntp 2>/dev/null || true; '
+                'fi'
+            ],
+            wait=False,
+        )
+    )
     run.wait(
         cluster.run(
             args = [
@@ -45,7 +69,7 @@ def task(ctx, config):
                 'sudo', 'systemctl', 'stop', 'ntpd.service', run.Raw('||'),
                 'sudo', 'systemctl', 'stop', 'chronyd.service',
                 run.Raw(';'),
-                'sudo', 'ntpd', '-gq', run.Raw('||'),
+                'sudo', 'timeout', '30', 'ntpd', '-gq', run.Raw('||'),
                 'sudo', 'chronyc', 'makestep',
                 run.Raw(';'),
                 'sudo', 'systemctl', 'start', 'ntp.service', run.Raw('||'),
@@ -57,7 +81,6 @@ def task(ctx, config):
                 run.Raw('||'),
                 'true'
             ],
-            timeout = 360,
             wait=False,
         )
     )

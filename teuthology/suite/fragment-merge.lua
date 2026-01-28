@@ -29,9 +29,18 @@ local function reject()
 end
 -- this implements logic for filtering (via teuthology-suite CLI flags)
 local function matches(_ENV, f)
-  if description:find(f, 1, true) then
-    return true
+  if exact_match then
+    -- For exact matching, compare full descriptions
+    if description == f then
+      return true
+    end
+  else
+    -- For substring matching (backward compatibility)
+    if description:find(f, 1, true) then
+      return true
+    end
   end
+  
   if filter_fragments then
     for i,path in py_enumerate(base_frag_paths) do
       if path:find(f) then

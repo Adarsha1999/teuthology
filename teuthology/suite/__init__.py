@@ -71,6 +71,10 @@ def process_args(args):
                 value = []
             else:
                 value = [x.strip() for x in value.split(',')]
+        elif key == 'rerun_exact':
+            value = strtobool(value)
+        elif key == 'rerun_skip_known':
+            value = strtobool(value)
         elif key == 'ceph_repo':
             value = expand_short_repo_name(
                 value,
@@ -112,7 +116,8 @@ def main(args):
     conf = process_args(args)
     if conf.verbose:
         teuthology.log.setLevel(logging.DEBUG)
-
+    # import pdb; pdb.set_trace(); 
+    print(f"conf------- : {conf}")
     dry_run = conf.dry_run
     if not conf.machine_type or conf.machine_type == 'None':
         if not config.default_machine_type or config.default_machine_type == 'None':
@@ -130,7 +135,9 @@ def main(args):
         log.info('Will upload archives to ' + conf.archive_upload)
 
     if conf.rerun:
-        get_rerun_conf_overrides(conf)
+        if get_rerun_conf_overrides(conf) is False:
+            log.info("Rerun cancelled due to no unknown failures")
+            return
     if conf.seed < 0:
         conf.seed = random.randint(0, 9999)
         log.info('Using random seed=%s', conf.seed)
@@ -154,7 +161,7 @@ def get_rerun_conf_overrides(conf):
     except IndexError:
         job0 = None
 
-    seed = None if job0 is None else job0.get('seed')
+    seed = None if job0 is None else int(job0.get('seed'))
     if conf.seed >= 0 and conf.seed != seed:
         log.error('--seed %s does not match with rerun seed: %s',
                   conf.seed, seed)
@@ -200,7 +207,63 @@ def get_rerun_conf_overrides(conf):
         )
         return
 
-    conf.filter_in.extend(rerun_filters['descriptions'])
+    # Check if we should skip known failures
+    if getattr(conf, 'rerun_skip_known', False):
+        # Filter to only unknown failures
+        unknown_descriptions = filter_unknown_failures(run, conf.rerun_statuses)
+        if unknown_descriptions:
+            conf.filter_in.extend(unknown_descriptions)
+            log.info("Using unknown failure filtering for rerun with %d unknown failures", len(unknown_descriptions))
+        else:
+            log.info("No unknown failures found, skipping rerun")
+            return False
+    # Use exact matching if requested, otherwise use backward-compatible approach
+    elif getattr(conf, 'rerun_exact', False):
+        # Use exact job descriptions for precise matching
+        conf.filter_in.extend(rerun_filters['descriptions'])
+        log.info("Using exact job description matching for rerun with %d exact filters", len(rerun_filters['descriptions']))
+    else:
+        # Backward compatible: use original full descriptions with filter_in
+        original_descriptions = [job['description'] for job in run['jobs'] if job['status'] in conf.rerun_statuses and job['description']]
+        conf.filter_in.extend(original_descriptions)
+        log.info("Using backward-compatible job filtering for rerun with %d job descriptions", len(original_descriptions))
+
+
+def filter_unknown_failures(run, statuses, known_patterns_file='known_patterns.json'):
+    """
+    Filter out jobs with known failure patterns, keeping only unknown failures.
+    Returns list of job descriptions for jobs with unknown failures.
+    """
+    import json
+    import re
+    
+    # Load known patterns
+    try:
+        with open(known_patterns_file, 'r') as f:
+            patterns_data = json.load(f)
+        known_patterns = patterns_data.get('patterns', [])
+    except (FileNotFoundError, json.JSONDecodeError):
+        log.warning(f"Could not load known patterns from {known_patterns_file}, treating all as unknown")
+        known_patterns = []
+    
+    unknown_jobs = []
+    for job in run['jobs']:
+        if job['status'] in statuses and job.get('description'):
+            failure_reason = job.get('failure_reason', '')
+            
+            # Check if failure matches any known pattern
+            is_known = False
+            for pattern in known_patterns:
+                if re.search(pattern, failure_reason):
+                    is_known = True
+                    log.debug(f"Job {job['description']} matches known pattern: {pattern}")
+                    break
+            
+            if not is_known:
+                unknown_jobs.append(job['description'])
+                log.debug(f"Job {job['description']} has unknown failure: {failure_reason}")
+    
+    return unknown_jobs
 
 
 def get_rerun_filters(run, statuses):
@@ -209,6 +272,8 @@ def get_rerun_filters(run, statuses):
     for job in run['jobs']:
         if job['status'] in statuses:
             jobs.append(job)
+    
+    # Return exact job descriptions for precise matching
     filters['descriptions'] = [job['description'] for job in jobs if job['description']]
     return filters
 

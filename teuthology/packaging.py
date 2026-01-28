@@ -420,7 +420,7 @@ def _get_config_value_for_remote(ctx, remote, config, key):
 def _get_response(url, wait=False, sleep=15, tries=10):
     with safe_while(sleep=sleep, tries=tries, _raise=False) as proceed:
         while proceed():
-            resp = requests.get(url)
+            resp = requests.get(url, timeout=60)
             if resp.ok:
                 log.info('Package found...')
                 break
@@ -754,7 +754,7 @@ class GitbuilderProject(object):
         """
         url = "{0}/sha1".format(self.base_url)
         log.info("Looking for package sha1: {0}".format(url))
-        resp = requests.get(url)
+        resp = requests.get(url, timeout=60)
         sha1 = None
         if not resp.ok:
             # TODO: maybe we should have this retry a few times?
@@ -867,6 +867,7 @@ class ShamanProject(GitbuilderProject):
         log.debug("Querying %s", uri)
         resp = requests.get(
             uri,
+            timeout=60,
             headers={'content-type': 'application/json'},
         )
         resp.raise_for_status()
@@ -989,7 +990,7 @@ class ShamanProject(GitbuilderProject):
         build_url = urljoin(self.query_url, path)
 
         try:
-            resp = requests.get(build_url)
+            resp = requests.get(build_url, timeout=60)
             resp.raise_for_status()
         except requests.HttpError:
             return False
@@ -1010,7 +1011,7 @@ class ShamanProject(GitbuilderProject):
         return False
 
     def _get_repo(self):
-        resp = requests.get(self.repo_url)
+        resp = requests.get(self.repo_url, timeout=60)
         resp.raise_for_status()
         return str(resp.text)
 
