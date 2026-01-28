@@ -73,8 +73,6 @@ def fetch_upstream_build(branch, platform="centos-9", arch="x86_64"):
     image = IMAGE_URL.format(_id)
     build["image"] = image
     build["shaman_id"] = _id
-
-    # return build["shaman_id"]
     return build
 
 def fetch_all_builds_for_platform(branch, platform, arch="x86_64"):
@@ -239,7 +237,6 @@ if __name__ == "__main__":
     branch = args["--branch"].lower()
     arch = args["--arch"].lower()
     output = args.get("--output")
-    flavor = args.get("--flavor")
     # Support comma-separated platform list
     platforms = [p.strip().lower() for p in args["--platform"].split(",")]
 

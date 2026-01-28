@@ -92,7 +92,7 @@ def setup_log_file(log_path):
         datefmt='%Y-%m-%dT%H:%M:%S')
     handler = logging.FileHandler(filename=log_path)
     handler.setFormatter(formatter)
-    
+
     # Apply log masking filter to new handler if masking is enabled
     try:
         from teuthology.util.logmask import apply_filter_to_handler
